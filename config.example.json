@@ -1,0 +1,15 @@
+{
+  "panel_width_percent": 30,
+  "hotkeys": {
+    "edit-tab": "prefix+alt+t",
+    "edit-space": "prefix+alt+s",
+    "edit-pane": "prefix+alt+p",
+    "remove-space": "prefix+alt+shift+s",
+    "remove-tab": "prefix+alt+shift+t",
+    "remove-pane": "prefix+alt+shift+p",
+    "settings": "",
+    "close-pane": "",
+    "close-tab": "",
+    "close-space": ""
+  }
+}

@@ -1,0 +1,141 @@
+id = "herdr-description"
+name = "herdr-description"
+version = "0.4.6"
+min_herdr_version = "0.9.3"
+description = "File-backed descriptions for workspaces, tabs, and panes with simple editors and save on focus loss"
+platforms = ["linux", "macos"]
+
+[[startup]]
+command = ["python3", "plugin.py", "restore"]
+
+[[actions]]
+id = "edit-tab"
+title = "Create/edit tab description"
+contexts = ["workspace", "tab", "pane"]
+command = ["python3", "plugin.py", "action", "edit-tab"]
+
+[[actions]]
+id = "edit-space"
+title = "Create/edit space description"
+contexts = ["workspace", "tab", "pane"]
+command = ["python3", "plugin.py", "action", "edit-space"]
+
+[[actions]]
+id = "edit-pane"
+title = "Create/edit pane description"
+contexts = ["workspace", "tab", "pane"]
+command = ["python3", "plugin.py", "action", "edit-pane"]
+
+[[actions]]
+id = "remove-space"
+title = "Remove space description"
+contexts = ["workspace", "tab", "pane"]
+command = ["python3", "plugin.py", "action", "remove-space"]
+
+[[actions]]
+id = "remove-tab"
+title = "Remove tab description"
+contexts = ["workspace", "tab", "pane"]
+command = ["python3", "plugin.py", "action", "remove-tab"]
+
+[[actions]]
+id = "remove-pane"
+title = "Remove pane description"
+contexts = ["workspace", "tab", "pane"]
+command = ["python3", "plugin.py", "action", "remove-pane"]
+
+[[actions]]
+id = "settings"
+title = "herdr-description settings"
+contexts = ["workspace", "tab", "pane"]
+command = ["python3", "plugin.py", "action", "settings"]
+
+[[actions]]
+id = "close-pane"
+title = "Close pane with description confirmation"
+contexts = ["workspace", "tab", "pane"]
+command = ["python3", "plugin.py", "action", "close-pane"]
+
+[[actions]]
+id = "close-tab"
+title = "Close tab with description confirmation"
+contexts = ["workspace", "tab", "pane"]
+command = ["python3", "plugin.py", "action", "close-tab"]
+
+[[actions]]
+id = "close-space"
+title = "Close space with description confirmation"
+contexts = ["workspace", "tab", "pane"]
+command = ["python3", "plugin.py", "action", "close-space"]
+
+[[actions]]
+id = "restore"
+title = "Restore descriptions"
+command = ["python3", "plugin.py", "restore"]
+
+[[actions]]
+id = "restart-editors"
+title = "Save and restart description editors"
+command = ["python3", "plugin.py", "action", "restart-editors"]
+
+[[events]]
+on = "workspace.focused"
+command = ["python3", "plugin.py", "event"]
+
+[[events]]
+on = "tab.focused"
+command = ["python3", "plugin.py", "event"]
+
+[[events]]
+on = "workspace.created"
+command = ["python3", "plugin.py", "event"]
+
+[[events]]
+on = "tab.created"
+command = ["python3", "plugin.py", "event"]
+
+[[events]]
+on = "pane.focused"
+command = ["python3", "plugin.py", "event"]
+
+[[events]]
+on = "pane.created"
+command = ["python3", "plugin.py", "event"]
+
+[[events]]
+on = "pane.closed"
+command = ["python3", "plugin.py", "event"]
+
+[[events]]
+on = "pane.exited"
+command = ["python3", "plugin.py", "event"]
+
+[[events]]
+on = "pane.moved"
+command = ["python3", "plugin.py", "event"]
+
+[[events]]
+on = "workspace.closed"
+command = ["python3", "plugin.py", "event"]
+
+[[events]]
+on = "tab.closed"
+command = ["python3", "plugin.py", "event"]
+
+[[panes]]
+id = "section"
+title = "description"
+placement = "split"
+command = ["sh", "-c", "exec python3 \"$HERDR_PLUGIN_ROOT/plugin.py\" panel"]
+
+[[panes]]
+id = "settings"
+title = "herdr-description settings"
+placement = "overlay"
+command = ["python3", "plugin.py", "settings"]
+
+[[panes]]
+id = "confirm-close"
+title = "Confirm close"
+placement = "overlay"
+command = ["python3", "plugin.py", "confirm-close"]

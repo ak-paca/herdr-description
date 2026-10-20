@@ -1,0 +1,70 @@
+import hashlib
+import json
+import tempfile
+import unittest
+from pathlib import Path
+from unittest.mock import patch
+
+from herdr_description.app import edit_settings
+from herdr_description.config import load_config
+
+
+class SettingsEditorTest(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.directory = Path(temporary.name)
+        load_config(self.directory)
+        self.path = self.directory / "config.json"
+
+    def invoke(self, interaction):
+        with patch("herdr_description.app.run_editor", side_effect=interaction):
+            edit_settings(self.directory)
+
+    def save_payload(self, original, proposed, force=False):
+        return {"save": {
+            "content": proposed,
+            "expected_digest": hashlib.sha256(original.encode("utf-8")).hexdigest(),
+            "force": force,
+        }}
+
+    def test_valid_save_uses_simple_editor_and_returns_normalized_configuration(self):
+        def interaction(path, poll):
+            self.assertEqual(path, self.path)
+            original = poll({})["record"]["content"]
+            proposed = json.dumps({"panel_width_percent": 40})
+            response = poll(self.save_payload(original, proposed))
+            self.assertTrue(response["saved"])
+            self.assertEqual(response["record"]["content"], self.path.read_text())
+            self.assertEqual(load_config(self.directory).panel_width_percent, 40)
+        self.invoke(interaction)
+
+    def test_invalid_configuration_never_replaces_existing_file(self):
+        original = self.path.read_text()
+        for proposed in ("{", '{"panel_width_percent": 1}', '{"hotkeys": {}, "hotkeys": {}}'):
+            with self.subTest(proposed=proposed):
+                def interaction(path, poll):
+                    self.assertIn("error", poll(self.save_payload(original, proposed)))
+                    self.assertEqual(path.read_text(), original)
+                self.invoke(interaction)
+
+    def test_external_change_requires_explicit_overwrite(self):
+        original = self.path.read_text()
+        external = '{"panel_width_percent": 35}\n'
+        self.path.write_text(external)
+        def interaction(path, poll):
+            response = poll(self.save_payload(original, '{"panel_width_percent": 45}'))
+            self.assertTrue(response["conflict"])
+            self.assertEqual(path.read_text(), external)
+            response = poll(self.save_payload(original, '{"panel_width_percent": 45}', force=True))
+            self.assertTrue(response["saved"])
+            self.assertEqual(load_config(self.directory).panel_width_percent, 45)
+        self.invoke(interaction)
+
+    def test_crlf_digest_matches_the_editor_file_bytes(self):
+        original = '{\r\n  "panel_width_percent": 30\r\n}\r\n'
+        self.path.write_bytes(original.encode("utf-8"))
+        def interaction(path, poll):
+            self.assertEqual(poll({})["record"]["content"], original)
+            self.assertTrue(poll(self.save_payload(original, '{"panel_width_percent": 40}'))["saved"])
+        self.invoke(interaction)
