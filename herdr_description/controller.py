@@ -9,6 +9,7 @@ from pathlib import Path
 from .api import Herdr, HerdrError
 from .config import load_config
 from .documents import DocumentConflictError, DocumentStore
+from .indicators import NameIndicators
 from .layout import ColumnLayout
 from .runtime import Runtime
 from .storage import DescriptionStoreError
@@ -34,6 +35,7 @@ class App:
         self.runtime = Runtime(state_dir, self.api.socket_path)
         self.store = DocumentStore(state_dir)
         self.session = self.runtime.session_id
+        self.indicators = NameIndicators(self.api, self.runtime, self.store)
 
     def identity(self, workspace_id):
         identity = self.runtime.identity(workspace_id)
@@ -88,7 +90,9 @@ class App:
         return [
             {
                 "pane_id": pane["pane_id"],
-                "label": pane.get("label") or pane.get("title") or "",
+                "label": self.indicators.undecorated_label(
+                    "pane", pane["pane_id"], pane.get("label") or pane.get("title") or "",
+                ),
                 **({"terminal_id": pane["terminal_id"]} if pane.get("terminal_id") else {}),
             }
             for pane in panes
@@ -206,6 +210,16 @@ class App:
             self.api.call("notification.show", title=title or PLUGIN_ID, body=message, sound="none")
         except (HerdrError, OSError):
             print(message, file=sys.stderr)
+
+    def sync_indicators(self, snapshot=None):
+        state = self.runtime.indicator_state()
+        if not state["enabled"] and not state["entries"]:
+            return
+        try:
+            snapshot = snapshot or self.api.snapshot()
+            self.indicators.sync(snapshot, excluded_pane_ids=self.owned_ids(snapshot))
+        except (HerdrError, OSError, DescriptionStoreError) as error:
+            print("Could not update description indicators: " + str(error), file=sys.stderr)
 
     def tree_leaves(self, node, path=()):
         if node["type"] == "pane":
@@ -449,6 +463,12 @@ class App:
     def action(self, action):
         if action == "restart-editors":
             return self.restart_editors()
+        if action == "toggle-indicators":
+            with self.runtime.lock():
+                snapshot = self.api.snapshot()
+                enabled = self.indicators.toggle(snapshot, excluded_pane_ids=self.owned_ids(snapshot))
+                self.notify("Description indicators " + ("enabled." if enabled else "disabled."))
+            return
         with self.runtime.lock():
             self.recover_layouts()
             snapshot = self.api.snapshot()
@@ -498,6 +518,7 @@ class App:
                     if record:
                         self.store.delete(self.session, kind, target)
                         self.discard_record(record.description_id)
+                        self.sync_indicators()
                         self.sync_panel(snapshot, workspace_id, tab_id)
                     return
                 if record is None:
@@ -634,6 +655,7 @@ class App:
             snapshot = self.api.snapshot()
             self.refresh_views(snapshot)
             self.sync_active_panel(snapshot)
+            self.sync_indicators()
             self.notify("Description editors restarted. Saved files and mappings were preserved.")
 
     def section_tick(self, tab_id, section_id, payload):
@@ -658,6 +680,7 @@ class App:
                 if record and record.description_id == section_id:
                     self.store.delete(self.session, record.kind, record.target_id)
                     self.discard_record(section_id)
+                self.sync_indicators()
                 self.close_section(view, section_id)
                 snapshot = self.api.snapshot()
                 if any(tab["tab_id"] == tab_id for tab in snapshot["tabs"]):
@@ -729,11 +752,13 @@ class App:
                 self.runtime.put_view(view)
             if retired and not modified:
                 self.close_section(view, section_id)
+                self.sync_indicators()
                 return {"closed": True, "saved": saved}
             presented = next((
                 item for item in self.descriptions(view["workspace_id"], tab_id)
                 if item["description_id"] == section_id
             ), {**dataclasses.asdict(record), "title": record.kind.capitalize() + " description", "focused": False})
+            self.sync_indicators()
             return {
                 "record": presented, "saved": saved, "removable": True,
                 "write_requested": (section.get("request") or {}).get("action") == "save",
@@ -769,6 +794,7 @@ class App:
             self.runtime.put_view(view)
             if action == "save" and request.get("return_focus", True):
                 self.restore_focus(view)
+            self.sync_indicators()
             descriptions = self.descriptions(view["workspace_id"], tab_id)
             existing = {record["description_id"] for record in descriptions}
             if any(change["description_id"] not in existing for change in payload.get("changes", [])):
@@ -874,6 +900,7 @@ class App:
             )
             self.refresh_views(snapshot)
             self.sync_active_panel(snapshot)
+            self.sync_indicators()
 
     def close_description_only_tabs(self, snapshot, tab_ids=None, moved_pane_id=None):
         for view in self.runtime.views():
@@ -1046,3 +1073,4 @@ class App:
                 self.api.call("pane.close", pane_id=pane_id)
             snapshot = self.close_description_only_tabs(self.api.snapshot(), {tab_id})
             self.cleanup_closed(kind, workspace_id, tab_id, pane_id, snapshot)
+            self.sync_indicators()

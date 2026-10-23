@@ -23,6 +23,10 @@ class Runtime:
                 "CREATE TABLE IF NOT EXISTS identities "
                 "(workspace_id TEXT PRIMARY KEY, data TEXT NOT NULL)"
             )
+            db.execute(
+                "CREATE TABLE IF NOT EXISTS name_indicators "
+                "(id INTEGER PRIMARY KEY CHECK (id = 1), data TEXT NOT NULL)"
+            )
         self.database.chmod(0o600)
 
     @contextlib.contextmanager
@@ -100,4 +104,16 @@ class Runtime:
         with self.connect() as db:
             db.execute(
                 "DELETE FROM identities WHERE workspace_id = ?", (workspace_id,)
+            )
+
+    def indicator_state(self):
+        with self.connect() as db:
+            row = db.execute("SELECT data FROM name_indicators WHERE id = 1").fetchone()
+        return json.loads(row[0]) if row else {"enabled": False, "entries": {}}
+
+    def put_indicator_state(self, state):
+        with self.connect() as db:
+            db.execute(
+                "INSERT OR REPLACE INTO name_indicators VALUES (1, ?)",
+                (json.dumps(state),),
             )

@@ -4,6 +4,7 @@
     "edit-tab": "prefix+alt+t",
     "edit-space": "prefix+alt+s",
     "edit-pane": "prefix+alt+p",
+    "toggle-indicators": "prefix+alt+i",
     "remove-space": "prefix+alt+shift+s",
     "remove-tab": "prefix+alt+shift+t",
     "remove-pane": "prefix+alt+shift+p",
