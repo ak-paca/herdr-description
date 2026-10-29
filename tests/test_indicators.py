@@ -100,7 +100,9 @@ class IndicatorHarness(AppHarness):
         Path(record["file_path"]).write_text(content, encoding="utf-8")
         return record
 
-    def save(self, record, content, base=""):
+    def save(self, record, content, base=None):
+        if base is None:
+            base = record["content"]
         return self.poll(record, editor="simple", modified=True, save={
             "content": content,
             "expected_digest": hashlib.sha256(base.encode("utf-8")).hexdigest(),
@@ -162,7 +164,7 @@ class IndicatorTest(IndicatorHarness, unittest.TestCase):
         self.poll(record, modified=True, content="unsaved draft")
         for kind in ("space", "tab", "pane"):
             self.assertNotIn("✎", self.visible(kind))
-        self.assertEqual("", self.stored(record).content)
+        self.assertEqual(record["content"], self.stored(record).content)
 
     def test_toggle_off_restores_names_and_preserves_notes(self):
         records = [self.note(kind) for kind in ("space", "tab", "pane")]

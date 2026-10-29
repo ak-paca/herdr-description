@@ -7,7 +7,7 @@ import uuid
 from pathlib import Path
 
 from .api import Herdr, HerdrError
-from .config import load_config
+from .config import load_config, toggle_autosave
 from .documents import DocumentConflictError, DocumentStore
 from .indicators import NameIndicators
 from .layout import ColumnLayout
@@ -213,13 +213,18 @@ class App:
 
     def sync_indicators(self, snapshot=None):
         state = self.runtime.indicator_state()
-        if not state["enabled"] and not state["entries"]:
+        if (
+            not state["enabled"] and not state["entries"] and not state.get("name_entries")
+            and not self.store.list_mappings(self.session)
+        ):
             return
         try:
             snapshot = snapshot or self.api.snapshot()
             self.indicators.sync(snapshot, excluded_pane_ids=self.owned_ids(snapshot))
         except (HerdrError, OSError, DescriptionStoreError) as error:
-            print("Could not update description indicators: " + str(error), file=sys.stderr)
+            warning = "Could not update description names or indicators: " + str(error)
+            print(warning, file=sys.stderr)
+            return warning
 
     def tree_leaves(self, node, path=()):
         if node["type"] == "pane":
@@ -525,6 +530,7 @@ class App:
                     record = self.store.create(
                         self.session, kind, target, space_id=self.identity(workspace_id),
                         tab_id=self.target(workspace_id, tab_id, "tab") if kind == "pane" else None,
+                        content="-- ",
                     )
                 view = self.sync_panel(snapshot, workspace_id, tab_id, pane_id)
                 previous = pane_id if pane_id not in self.owned_ids() else (
@@ -692,6 +698,11 @@ class App:
                     return {"error": "Description was removed; unsaved text is retained."}
                 self.close_section(view, section_id)
                 return {"closed": True}
+            self.config = (
+                toggle_autosave(self.config_dir) if payload.get("toggle_autosave") is True
+                else load_config(self.config_dir)
+            )
+            mode = {"autosave_supported": True, "autosave_enabled": self.config.autosave_enabled}
             retired = section.get("retired", False) or (
                 record.kind == "pane"
                 and record.tab_id != self.target(view["workspace_id"], tab_id, "tab")
@@ -710,6 +721,10 @@ class App:
             if save is not None:
                 if not isinstance(save, dict):
                     raise ValueError("Invalid editor save request.")
+                if save.get("reason") == "autosave" and not self.config.autosave_enabled:
+                    section["modified"] = bool(payload.get("modified"))
+                    self.runtime.put_view(view)
+                    return {"saved": False, "autosave_skipped": True, **mode}
                 try:
                     record = self.store.save_file(
                         self.session, record.kind, record.target_id, save["content"],
@@ -719,16 +734,17 @@ class App:
                 except DocumentConflictError as error:
                     self.runtime.put_view(view)
                     self.notify("Could not save {} description: file changed elsewhere.".format(record.kind))
-                    return {"error": str(error), "conflict": True}
+                    return {"error": str(error), "conflict": True, **mode}
                 except (OSError, DescriptionStoreError) as error:
                     self.runtime.put_view(view)
                     self.notify("Could not save {} description: {}".format(record.kind, error))
-                    return {"error": str(error)}
+                    return {"error": str(error), **mode}
                 saved = True
                 requested_id = save.get("request_id")
                 if requested_id is None or requested_id == request.get("id"):
                     section["request"] = None
-                self.notify("", title="{} description saved".format(record.kind.capitalize()))
+                if save.get("reason") != "autosave":
+                    self.notify("", title="{} description saved".format(record.kind.capitalize()))
             elif payload.get("saved"):
                 saved = True
                 section["request"] = None
@@ -736,7 +752,7 @@ class App:
                 self.runtime.put_view(view)
                 return_focus = payload.get("return_focus", False)
                 if save is not None:
-                    return_focus = request.get("return_focus", False)
+                    return_focus = request.get("return_focus", False) and save.get("reason") != "autosave"
                 if request.get("reason") == "restart":
                     return_focus = False
                 if return_focus:
@@ -758,13 +774,14 @@ class App:
                 item for item in self.descriptions(view["workspace_id"], tab_id)
                 if item["description_id"] == section_id
             ), {**dataclasses.asdict(record), "title": record.kind.capitalize() + " description", "focused": False})
-            self.sync_indicators()
+            name_warning = self.sync_indicators()
             return {
                 "record": presented, "saved": saved, "removable": True,
+                **mode,
                 "write_requested": (section.get("request") or {}).get("action") == "save",
                 "save_request": section.get("request"),
                 "editor_focused": section.get("editor_focused", False),
-                "warning": warning,
+                "warning": warning or name_warning,
             }
 
     def tick(self, tab_id, payload):

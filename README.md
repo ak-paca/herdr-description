@@ -4,7 +4,7 @@
 
 Persistent descriptions for Herdr spaces, tabs, and panes. Requires Herdr 0.9.3+ and Python 3.9+ with `curses`. No third-party dependencies.
 
-Descriptions open as stacked native panes in a full-height column on the right. Type in the editor; there are no Vim modes. Changes save on focus loss or `Ctrl+S`.
+Descriptions open as stacked native panes in a full-height column on the right. Type in the editor; there are no Vim modes. Each text modification saves automatically by default.
 
 When regrouping an existing split layout, the plugin briefly moves panes through a temporary tab. Running terminals and editors, pane IDs, and split directions and proportions are preserved.
 
@@ -38,16 +38,37 @@ herdr plugin enable herdr-description
 
 ## Editor
 
+New descriptions start with `-- `, with the cursor ready for a name. A non-empty first line beginning with `--` renames the associated workspace, tab, or pane as it is saved:
+
+```text
+-- new workspace name
+comment line
+```
+
+Only that description's own header controls its object's name. A blank `-- ` does not blank the name or count as a non-empty description. Removing the header stops controlling the name; the last explicit name remains, and pane metadata from other reporters can become visible again. Description indicators still inherit upward and compose with header names.
+
+`Ctrl+A` toggles per-modification autosave for **all description editors using the same plugin configuration**, including named Herdr sessions. The setting survives restarts. With it off, changes still save on focus loss or `Ctrl+S`. The settings editor always saves manually so incomplete JSON is not applied. Conflicting external edits remain protected; automatic saves never force an overwrite.
+
+The footer shows status and a help hint. `Ctrl+/` opens the commands helper; press `q` to close it. `Ctrl+_` or `F1` also opens help when the terminal does not distinguish `Ctrl+/`.
+
 | Shortcut | Behavior |
 |---|---|
+| `Ctrl+A` | Toggle global per-modification autosave |
+| `Ctrl+/` / `F1` | Open commands helper; `q` closes it |
 | `Ctrl+S` | Save |
 | `Ctrl+R` | Reload (confirms if dirty) |
 | `Ctrl+K` | Delete current line |
 | `Ctrl+L` | Clear all text (`Y` confirms) |
-| `Ctrl+W` | Toggle word wrap |
+| `Ctrl+W` | Toggle wrapping for both text and the footer |
 | `Ctrl+X` | Remove this description, its file and mapping, and close its editor |
+| Mouse drag / Shift+arrows | Select text |
+| `Ctrl+Space`, then arrows | Start keyboard selection |
+| `Ctrl+C` | Copy the selected text |
+| Escape | Clear the selection |
 
 `Ctrl+X` acts on the description open in that editor, independently of the last focused work pane. It is disabled in the settings editor.
+
+HTTP and HTTPS links are underlined. Ctrl+click opens the complete address, including paths, query parameters, and fragments, even when the link is wrapped or partly off-screen. Copy uses Herdr's terminal clipboard forwarding; remote or outer terminals may require clipboard permission.
 
 ## Plugin commands
 
@@ -80,7 +101,7 @@ For custom locations, pass `--config-dir` and `--state-dir` to `plugin.py`.
 herdr plugin action invoke herdr-description.settings
 ```
 
-`panel_width_percent` defaults to `30` (15–60). `hotkeys` maps action IDs to chords.
+`panel_width_percent` defaults to `30` (15–60). `autosave_enabled` defaults to `true` and is updated by `Ctrl+A`. `hotkeys` maps action IDs to chords.
 
 **How do I restore, restart, or export?**
 

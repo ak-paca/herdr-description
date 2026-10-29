@@ -1,5 +1,6 @@
 {
   "panel_width_percent": 30,
+  "autosave_enabled": true,
   "hotkeys": {
     "edit-tab": "prefix+alt+t",
     "edit-space": "prefix+alt+s",

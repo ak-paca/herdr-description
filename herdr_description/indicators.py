@@ -1,12 +1,14 @@
 from pathlib import Path
 
 from .api import HerdrError
+from .names import description_name, meaningful_description
 from .storage import DescriptionStoreError
 
 
 MARKER = "✎"
 PREFIX = MARKER + " "
 METADATA_SOURCE = "herdr-description.indicator"
+NAME_METADATA_SOURCE = "herdr-description.name"
 
 
 class NameIndicators:
@@ -48,7 +50,7 @@ class NameIndicators:
         entries = state["entries"]
         excluded = set(excluded_pane_ids) | self._editor_ids(snapshot)
         entities = self._entities(snapshot)
-        targets = self._targets(entities, excluded, state["enabled"])
+        targets = self._targets(entities, excluded)
         by_description = {target["record"].description_id: target for target in targets.values()}
         replaced = set()
         for key, entry in list(entries.items()):
@@ -74,18 +76,18 @@ class NameIndicators:
                     continue
                 entries.pop(key)
 
-        targets = self._inherit_targets(entities, targets, replaced)
         failures = []
-        changed = False
+        changed, failed_names = self._sync_names(state, entities, targets, replaced, excluded, failures)
+        targets = self._inherit_targets(entities, targets, replaced)
         for key in sorted(set(entries) | set(targets)):
-            if key in replaced:
+            if key in replaced or key in failed_names:
                 continue
             entity = entities.get(key)
             if entity is None:
                 continue
             target = targets.get(key)
             entry = entries.get(key)
-            if target and target["unavailable"] and not (
+            if state["enabled"] and target and target["unavailable"] and not (
                 entity["kind"] == "space" and entry is not None
                 and entry.get("prefix", "").isspace() and entry.get("suffix") == ""
             ):
@@ -121,7 +123,7 @@ class NameIndicators:
                 result[self._key(kind, host_id)] = entity
         return result
 
-    def _targets(self, entities, excluded, enabled):
+    def _targets(self, entities, excluded):
         result = {}
         mappings = self.store.list_mappings(self.runtime.session_id)
         by_target = {}
@@ -146,15 +148,131 @@ class NameIndicators:
                 entity["space_id"] + "/" + entity["item"]["tab_id"]
             ):
                 continue
-            target = {"entity": entity, "record": record, "unavailable": False, "nonempty": False}
-            if enabled:
-                try:
-                    document = self.store.get(self.runtime.session_id, record.kind, record.target_id)
-                    target["nonempty"] = bool(document and document.content.strip())
-                except (OSError, UnicodeError, DescriptionStoreError):
+            target = {
+                "entity": entity, "record": record, "unavailable": False,
+                "nonempty": False, "name": None,
+            }
+            try:
+                document = self.store.get(self.runtime.session_id, record.kind, record.target_id)
+                if document is not None:
+                    target["nonempty"] = meaningful_description(document.content)
+                    target["name"] = description_name(document.content)
+                else:
                     target["unavailable"] = True
+            except (OSError, UnicodeError, DescriptionStoreError):
+                target["unavailable"] = True
             result[key] = target
         return result
+
+    def _sync_names(self, state, entities, targets, replaced, excluded, failures):
+        names = state.setdefault("name_entries", {})
+        by_description = {target["record"].description_id: target for target in targets.values()}
+        for key, entry in list(names.items()):
+            entity = entities.get(key)
+            target = by_description.get(entry["description_id"])
+            if target and self._relocated(entry, target["entity"]):
+                entity = target["entity"]
+                new_key = self._key(entry["kind"], entity["host_id"])
+                if new_key != key:
+                    names.pop(key)
+                    names[new_key] = entry
+                self._set_scope(entry, entity)
+            elif not entity or not self._same_scope(entry, entity):
+                if entity and target and target["entity"] is entity:
+                    replaced.add(key)
+                else:
+                    names.pop(key)
+        changed = False
+        failed = set()
+        for key in sorted(set(names) | set(targets)):
+            entity = entities.get(key)
+            target = targets.get(key)
+            if key in replaced or entity is None or target and target["unavailable"]:
+                continue
+            if entity["kind"] == "pane" and entity["host_id"] in excluded:
+                continue
+            entry = names.get(key)
+            name = target["name"] if target else None
+            before = len(failures)
+            if name:
+                changed |= self._apply_name(state, entity, target, entry, failures)
+            elif entry:
+                changed |= self._remove_name(state, entity, entry, failures)
+            if len(failures) != before:
+                failed.add(key)
+        return changed, failed
+
+    def _apply_name(self, state, entity, target, entry, failures):
+        key = self._key(entity["kind"], entity["host_id"])
+        name = target["name"]
+        item = entity["item"]
+        marker = state["entries"].get(key)
+        if entry is None:
+            entry = {"title_confirmed": False}
+            self._set_scope(entry, entity)
+            state["name_entries"][key] = entry
+        if entry.get("name") != name:
+            entry["title_confirmed"] = False
+        entry.update(description_id=target["record"].description_id, name=name)
+        marked_name = (
+            entity["kind"] != "pane" and marker
+            and marker["original_label"] == name and item.get("label") == marker["decorated_label"]
+        )
+        changed = False
+        if item.get("label") != name and not marked_name:
+            self.runtime.put_indicator_state(state)
+            if not self._rename(entity, name, failures):
+                return False
+            item["label"] = name
+            changed = True
+        if marker:
+            marker["original_label"] = name
+        if entity["kind"] != "pane":
+            return changed
+        marked_title = marker and marker.get("original_title") == name and (
+            item.get("title") == marker["decorated_label"]
+        )
+        if not entry["title_confirmed"] or item.get("title") != name and not marked_title:
+            self.runtime.put_indicator_state(state)
+            if not self._metadata(entity, failures, source=NAME_METADATA_SOURCE, title=name):
+                return changed
+            entry["title_confirmed"] = True
+            item["title"] = name
+            changed = True
+        if marker:
+            marker["original_title"] = name
+        return changed
+
+    def _remove_name(self, state, entity, entry, failures):
+        key = self._key(entity["kind"], entity["host_id"])
+        marker = state["entries"].get(key)
+        if entity["kind"] != "pane":
+            if marker and entity["item"].get("label") == entry["name"]:
+                marker["original_label"] = entry["name"]
+            state["name_entries"].pop(key)
+            return False
+        self.runtime.put_indicator_state(state)
+        if not self._metadata(entity, failures, source=NAME_METADATA_SOURCE, clear_title=True):
+            return False
+        if marker and not self._metadata(entity, failures, clear_title=True):
+            return True
+        try:
+            current = next((
+                pane for pane in self.api.snapshot().get("panes", [])
+                if pane["pane_id"] == entity["host_id"]
+                and pane.get("terminal_id") == entity["terminal_id"]
+            ), None)
+        except (HerdrError, OSError, ValueError) as error:
+            failures.append("pane " + entity["host_id"] + ": " + str(error))
+            return True
+        if current is None:
+            failures.append("pane " + entity["host_id"] + " changed while restoring its title")
+            return True
+        entity["item"].update(current)
+        entity["item"]["title"] = current.get("title")
+        state["entries"].pop(key, None)
+        state["name_entries"].pop(key)
+        return True
 
     def _inherit_targets(self, entities, targets, excluded):
         result = {}
@@ -318,11 +436,11 @@ class NameIndicators:
         entry.update(confirmed=True, pending=False)
         return True
 
-    def _metadata(self, entity, failures, **values):
+    def _metadata(self, entity, failures, source=METADATA_SOURCE, **values):
         try:
             self.api.call(
                 "pane.report_metadata", pane_id=entity["host_id"],
-                source=METADATA_SOURCE, **values,
+                source=source, **values,
             )
         except (HerdrError, OSError, ValueError) as error:
             failures.append("pane " + entity["host_id"] + ": " + str(error))

@@ -138,7 +138,7 @@ class EditorCommandsTest(unittest.TestCase):
 class EditorWordWrapTest(unittest.TestCase):
     def setUp(self):
         self.screen = Mock()
-        self.screen.getmaxyx.return_value = (6, 6)
+        self.screen.getmaxyx.return_value = (20, 6)
         self.session = SimpleNamespace(
             buffer=TextBuffer("abcdefghijklmnop\nuvwxyz"),
             title="Description",
@@ -154,7 +154,7 @@ class EditorWordWrapTest(unittest.TestCase):
         return [
             call.args[2]
             for call in self.screen.addstr.call_args_list
-            if call.args[0] < max(1, height - 1)
+            if call.args[0] < self.editor.body_height
         ]
 
     def test_toggle_preserves_exact_draft_baseline_digest_and_cursor(self):
@@ -212,9 +212,10 @@ class EditorWordWrapTest(unittest.TestCase):
         self.session.buffer.move_horizontal(1)
         self.editor.handle_key("\x17")
         self.editor.handle_key(curses.KEY_NPAGE)
-        self.assertEqual((0, 19), (self.session.buffer.row, self.session.buffer.column))
+        self.assertEqual((0, 7), (self.session.buffer.row, self.session.buffer.column))
+        self.assertEqual(1, self.editor.body_height)
         self.editor.draw()
-        self.screen.move.assert_called_with(2, 1)
+        self.screen.move.assert_called_with(0, 1)
         self.editor.handle_key(curses.KEY_PPAGE)
         self.assertEqual((0, 1), (self.session.buffer.row, self.session.buffer.column))
 
@@ -269,7 +270,7 @@ class EditorWordWrapTest(unittest.TestCase):
         ):
             with self.subTest(content=content):
                 self.screen.reset_mock()
-                self.screen.getmaxyx.return_value = (6, width)
+                self.screen.getmaxyx.return_value = (30, width)
                 self.session.buffer.replace(content)
                 self.session.buffer.move_line_boundary()
                 self.editor.word_wrap = True

@@ -2,7 +2,9 @@ import json
 import stat
 import tempfile
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from threading import Barrier
 from unittest.mock import patch
 
 from herdr_description.config import (
@@ -12,6 +14,7 @@ from herdr_description.config import (
     keybindings,
     load_config,
     parse_config,
+    toggle_autosave,
     write_config,
 )
 
@@ -37,7 +40,7 @@ class ConfigTests(unittest.TestCase):
         self.assertTrue(path.read_bytes().endswith(b"\n"))
         self.assertEqual([path], list(self.directory.iterdir()))
         self.assertNotIn("editor", json.loads(path.read_text(encoding="utf-8")))
-        self.assertNotIn("autosave_enabled", json.loads(path.read_text(encoding="utf-8")))
+        self.assertTrue(json.loads(path.read_text(encoding="utf-8"))["autosave_enabled"])
         self.assertNotIn("autosave_interval_ms", json.loads(path.read_text(encoding="utf-8")))
 
     def test_defaults_do_not_share_mutable_values(self):
@@ -73,7 +76,7 @@ class ConfigTests(unittest.TestCase):
         self.assertNotIn("save", json.loads(path.read_text(encoding="utf-8"))["hotkeys"])
         self.assertEqual(config, load_config(self.directory))
 
-    def test_legacy_autosave_settings_are_ignored_without_rewriting_file(self):
+    def test_autosave_setting_is_honored_and_obsolete_interval_is_ignored(self):
         for enabled in (True, False):
             with self.subTest(enabled=enabled):
                 path = self.put(
@@ -85,15 +88,15 @@ class ConfigTests(unittest.TestCase):
                 )
                 original = path.read_bytes()
                 config = load_config(self.directory)
-                self.assertEqual(Config(), config)
+                self.assertEqual(Config(autosave_enabled=enabled), config)
                 self.assertFalse(hasattr(config, "editor"))
-                self.assertFalse(hasattr(config, "autosave_enabled"))
+                self.assertIs(config.autosave_enabled, enabled)
                 self.assertFalse(hasattr(config, "autosave_interval_ms"))
                 self.assertEqual(original, path.read_bytes())
                 write_config(self.directory, config)
                 saved = json.loads(path.read_text(encoding="utf-8"))
                 self.assertNotIn("editor", saved)
-                self.assertNotIn("autosave_enabled", saved)
+                self.assertIs(saved["autosave_enabled"], enabled)
                 self.assertNotIn("autosave_interval_ms", saved)
 
     def test_invalid_existing_config_is_not_overwritten(self):
@@ -150,6 +153,11 @@ class ConfigTests(unittest.TestCase):
             {"panel_width_percent": 14},
             {"panel_width_percent": 61},
             {"autosave": True},
+            {"autosave_enabled": 0},
+            {"autosave_enabled": 1},
+            {"autosave_enabled": "false"},
+            {"autosave_enabled": None},
+            {"autosave_enabled": []},
             {"hotkeys": []},
             {"hotkeys": {"unknown": ""}},
             {"hotkeys": {"edit-pane": None}},
@@ -179,6 +187,7 @@ class ConfigTests(unittest.TestCase):
             '"panel_width_percent": 40, "hotkeys": {"close-pane": "prefix+alt+x"}}'
         )
         self.assertEqual(40, config.panel_width_percent)
+        self.assertFalse(config.autosave_enabled)
         self.assertEqual("prefix+alt+x", config.hotkeys["close-pane"])
         self.assertFalse(hasattr(config, "editor"))
         self.assertFalse(self.directory.exists())
@@ -215,6 +224,47 @@ class ConfigTests(unittest.TestCase):
         with self.assertRaises(ConfigError):
             write_config(self.directory, Config(panel_width_percent=200))
         self.assertEqual(original, path.read_bytes())
+
+    def test_toggle_autosave_persists_and_preserves_other_settings(self):
+        original = Config(panel_width_percent=45)
+        original.hotkeys["edit-pane"] = "ctrl+alt+w"
+        write_config(self.directory, original)
+        disabled = toggle_autosave(self.directory)
+        self.assertFalse(disabled.autosave_enabled)
+        self.assertEqual(disabled, load_config(self.directory))
+        self.assertEqual(disabled.hotkeys, original.hotkeys)
+        self.assertEqual(disabled.panel_width_percent, original.panel_width_percent)
+        self.assertEqual(toggle_autosave(self.directory), original)
+
+    def test_invalid_autosave_values_cannot_be_loaded_toggled_or_written(self):
+        for value in (0, 1, "true", "false", None, [], {}):
+            with self.subTest(value=value):
+                path = self.put({"autosave_enabled": value, "panel_width_percent": 45})
+                original = path.read_bytes()
+                with self.assertRaisesRegex(ConfigError, "autosave_enabled must be a boolean"):
+                    load_config(self.directory)
+                with self.assertRaisesRegex(ConfigError, "autosave_enabled must be a boolean"):
+                    toggle_autosave(self.directory)
+                with self.assertRaisesRegex(ConfigError, "autosave_enabled must be a boolean"):
+                    write_config(self.directory, Config(autosave_enabled=value))
+                self.assertEqual(path.read_bytes(), original)
+
+    def test_concurrent_toggles_do_not_lose_updates(self):
+        original = Config(panel_width_percent=45)
+        original.hotkeys["edit-pane"] = "ctrl+alt+w"
+        write_config(self.directory, original)
+        barrier = Barrier(8)
+
+        def toggle_repeatedly(_):
+            barrier.wait(timeout=5)
+            return [toggle_autosave(self.directory).autosave_enabled for _ in range(5)]
+
+        with ThreadPoolExecutor(max_workers=8) as executor:
+            results = list(executor.map(toggle_repeatedly, range(8)))
+        values = [value for result in results for value in result]
+        self.assertEqual(values.count(True), 20)
+        self.assertEqual(values.count(False), 20)
+        self.assertEqual(load_config(self.directory), original)
 
     def test_failed_replace_preserves_existing_file_and_removes_temporary(self):
         load_config(self.directory)

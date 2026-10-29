@@ -1,3 +1,5 @@
+import contextlib
+import fcntl
 import json
 import os
 import tempfile
@@ -42,6 +44,7 @@ class ConfigError(ValueError):
 @dataclass
 class Config:
     panel_width_percent: int = 30
+    autosave_enabled: bool = True
     hotkeys: Dict[str, str] = field(default_factory=lambda: dict(DEFAULT_HOTKEYS))
 
 
@@ -66,6 +69,10 @@ def _validated(values: Mapping[str, Any]) -> Config:
     if type(width) is not int or not 15 <= width <= 60:
         raise ConfigError("panel_width_percent must be an integer from 15 to 60")
     config.panel_width_percent = width
+    autosave = values.get("autosave_enabled", config.autosave_enabled)
+    if type(autosave) is not bool:
+        raise ConfigError("autosave_enabled must be a boolean")
+    config.autosave_enabled = autosave
 
     hotkeys = values.get("hotkeys", {})
     if not isinstance(hotkeys, dict):
@@ -94,6 +101,7 @@ def _validated(values: Mapping[str, Any]) -> Config:
 def _as_dict(config: Config) -> Dict[str, Any]:
     return {
         "panel_width_percent": config.panel_width_percent,
+        "autosave_enabled": config.autosave_enabled,
         "hotkeys": config.hotkeys,
     }
 
@@ -163,6 +171,26 @@ def load_config(config_dir: Path) -> Config:
 
 def write_config(config_dir: Path, config: Config) -> Path:
     return _write(config_dir, config, create_only=False)
+
+
+@contextlib.contextmanager
+def config_lock(config_dir: Path):
+    config_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+    descriptor = os.open(str(config_dir / "config.lock"), os.O_CREAT | os.O_RDWR, 0o600)
+    with os.fdopen(descriptor, "a") as handle:
+        fcntl.flock(handle, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(handle, fcntl.LOCK_UN)
+
+
+def toggle_autosave(config_dir: Path) -> Config:
+    with config_lock(config_dir):
+        config = load_config(config_dir)
+        config.autosave_enabled = not config.autosave_enabled
+        write_config(config_dir, config)
+        return config
 
 
 def keybindings(config: Config) -> str:

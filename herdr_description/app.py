@@ -8,7 +8,7 @@ import sys
 from pathlib import Path
 
 from .api import Herdr, HerdrError
-from .config import Config, ConfigError, keybindings, load_config, parse_config, write_config
+from .config import Config, ConfigError, config_lock, keybindings, load_config, parse_config, write_config
 from .controller import App, PLUGIN_ID, context
 from .documents import DocumentStore
 from .editor import run_editor
@@ -37,21 +37,22 @@ def edit_settings(config_dir):
     path = config_dir / "config.json"
 
     def poll(payload):
-        content = path.read_bytes().decode("utf-8")
-        save = payload.get("save")
-        if save is not None:
-            try:
-                digest = hashlib.sha256(content.encode("utf-8")).hexdigest()
-                if digest != save.get("expected_digest") and not save.get("force"):
-                    return {"error": "Settings changed in another editor.", "conflict": True}
-                write_config(config_dir, parse_config(save["content"]))
-                content = path.read_bytes().decode("utf-8")
-            except (OSError, ValueError) as error:
-                return {"error": str(error)}
-        return {
-            "record": {"content": content, "title": "herdr-description settings", "focused": False},
-            "saved": save is not None,
-        }
+        with config_lock(config_dir):
+            content = path.read_bytes().decode("utf-8")
+            save = payload.get("save")
+            if save is not None:
+                try:
+                    digest = hashlib.sha256(content.encode("utf-8")).hexdigest()
+                    if digest != save.get("expected_digest") and not save.get("force"):
+                        return {"error": "Settings changed in another editor.", "conflict": True}
+                    write_config(config_dir, parse_config(save["content"]))
+                    content = path.read_bytes().decode("utf-8")
+                except (OSError, ValueError) as error:
+                    return {"error": str(error)}
+            return {
+                "record": {"content": content, "title": "herdr-description settings", "focused": False},
+                "saved": save is not None, "autosave_supported": False, "autosave_enabled": False,
+            }
 
     run_editor(path, poll)
 

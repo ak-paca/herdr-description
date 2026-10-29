@@ -26,6 +26,7 @@ class FakeHerdr:
         self.focused_pane_id = None
         self.tab_focus = {}
         self.move_events = []
+        self.reported_titles = {}
         self.add_tab("space-1", "tab-1", "shell-1")
 
     def add_tab(self, workspace_id, tab_id, pane_id):
@@ -260,7 +261,12 @@ class FakeHerdr:
                 self.focused_pane_id = pane_id
                 self.tab_focus[target["tab_id"]] = pane_id
             return {"plugin_pane": {"pane": copy.deepcopy(pane)}}
-        if method == "pane.rename":
+        if method in ("workspace.rename", "tab.rename"):
+            kind = method.split(".", 1)[0]
+            items = self.workspaces if kind == "workspace" else self.tabs
+            item = next(item for item in items if item[kind + "_id"] == arguments[kind + "_id"])
+            item["label"] = arguments["label"]
+        elif method == "pane.rename":
             pane = next(
                 pane for pane in self.panes if pane["pane_id"] == arguments["pane_id"]
             )
@@ -269,7 +275,16 @@ class FakeHerdr:
             pane = next(
                 pane for pane in self.panes if pane["pane_id"] == arguments["pane_id"]
             )
-            pane["tokens"] = dict(arguments["tokens"])
+            if "tokens" in arguments:
+                pane["tokens"] = dict(arguments["tokens"])
+            if "title" in arguments or arguments.get("clear_title"):
+                identity = pane.get("terminal_id") or pane["pane_id"]
+                titles = self.reported_titles.setdefault(identity, {"original": pane.get("title")})
+                source = arguments.get("source", "default")
+                titles.pop(source, None)
+                if "title" in arguments:
+                    titles[source] = arguments["title"]
+                pane["title"] = next((title for title in reversed(list(titles.values())) if title), None)
         elif method == "layout.export":
             return {"layout": {"root": copy.deepcopy(self.trees[arguments["tab_id"]])}}
         elif method == "layout.set_split_ratio":
@@ -532,19 +547,21 @@ class AppTest(AppHarness, unittest.TestCase):
             with self.subTest(extra=extra):
                 result = self.poll(record, modified=True, content="unsaved", **extra)
                 self.assertFalse(result["saved"])
-                self.assertEqual(self.stored(record).content, "")
+                self.assertEqual(self.stored(record).content, record["content"])
                 self.assertEqual(self.stored(record).revision, record["revision"])
-                self.assertEqual(self.app.store.file_path(record["description_id"]).read_bytes(), b"")
+                self.assertEqual(
+                    self.app.store.file_path(record["description_id"]).read_bytes(), record["content"].encode("utf-8")
+                )
         self.assertTrue(self.section(record)["modified"])
 
-    def test_old_autosave_config_cannot_enable_background_writes(self):
+    def test_enabled_autosave_does_not_persist_unstructured_poll_content(self):
         config_dir = self.root / "old-config" / "config"
         config_dir.mkdir(parents=True)
         (config_dir / "config.json").write_text(json.dumps({"autosave_enabled": True, "autosave_interval_ms": 250}) + "\n")
         app = self.make_app(FakeHerdr(), "old-config")
         record = self.create("tab", app=app)
         self.poll(record, app=app, modified=True, content="draft", force=True)
-        self.assertEqual(self.stored(record, app).content, "")
+        self.assertEqual(self.stored(record, app).content, record["content"])
 
     def test_vim_write_saves_only_this_record_and_keeps_focus(self):
         tab = self.create("tab")
@@ -554,7 +571,7 @@ class AppTest(AppHarness, unittest.TestCase):
         result = self.write(tab, "saved tab\n")
         self.assertTrue(result["saved"])
         self.assertEqual(self.stored(tab).content, "saved tab\n")
-        self.assertEqual(self.stored(space).content, "")
+        self.assertEqual(self.stored(space).content, space["content"])
         self.assertEqual(self.api.focused_pane_id, self.native_pane(tab)["pane_id"])
         self.assertTrue(self.section(space)["modified"])
 
@@ -644,8 +661,8 @@ class AppTest(AppHarness, unittest.TestCase):
             record, write=True, modified=True, description_id=other["description_id"],
             revision=record["revision"], content="wrong",
         )
-        self.assertEqual(self.stored(record).content, "")
-        self.assertEqual(self.stored(other).content, "")
+        self.assertEqual(self.stored(record).content, record["content"])
+        self.assertEqual(self.stored(other).content, other["content"])
 
     def test_shared_space_editors_open_same_real_file_and_poll_external_changes(self):
         self.api.add_tab("space-1", "tab-2", "shell-2")
@@ -677,8 +694,8 @@ class AppTest(AppHarness, unittest.TestCase):
         self.assertEqual(self.poll(tab, modified=True, write=True, content="deleted"), {"closed": True})
         self.assertIn({"pane_id": tab_pane_id}, self.methods("pane.close"))
         self.closed_event(tab_pane_id)
-        self.assertEqual(self.stored(space).content, "")
-        self.assertEqual(self.stored(pane).content, "")
+        self.assertEqual(self.stored(space).content, space["content"])
+        self.assertEqual(self.stored(pane).content, pane["content"])
         self.assertTrue(self.section(space)["modified"])
         self.assertTrue(self.section(pane)["modified"])
         self.assertEqual(len(self.app.runtime.view("tab-1")["sections"]), 2)
@@ -702,7 +719,7 @@ class AppTest(AppHarness, unittest.TestCase):
         second = self.create("tab", app=other)
         self.write(first, "first session")
         self.assertNotEqual(first["description_id"], second["description_id"])
-        self.assertEqual(self.stored(second, other).content, "")
+        self.assertEqual(self.stored(second, other).content, second["content"])
 
     def test_tab_close_cascades_panes_and_preserves_space_and_other_tab(self):
         self.api.add_tab("space-1", "tab-2", "shell-2")
@@ -888,7 +905,7 @@ class AppTest(AppHarness, unittest.TestCase):
             self.assertEqual(self.poll(record), {"closed": True})
         self.app.close_editor("tab-1", record["description_id"], "obsolete-marker")
         self.assertNotIn({"pane_id": pane_id}, self.methods("pane.close"))
-        self.assertEqual(self.stored(record).content, "")
+        self.assertEqual(self.stored(record).content, record["content"])
 
     def test_supervisor_closes_only_owned_pane_and_preserves_saved_description(self):
         record = self.create("tab")
@@ -915,7 +932,8 @@ class SimpleEditorAppTest(AppHarness, unittest.TestCase):
     def editor_poll(self, record, tab_id="tab-1", **payload):
         return self.poll(record, tab_id, editor="simple", **payload)
 
-    def save(self, record, content, request=None, base="", tab_id="tab-1", force=False):
+    def save(self, record, content, request=None, base=None, tab_id="tab-1", force=False):
+        base = record["content"] if base is None else base
         return self.editor_poll(record, tab_id, modified=True, save={
             "content": content,
             "expected_digest": hashlib.sha256(base.encode("utf-8")).hexdigest(),
@@ -943,14 +961,14 @@ class SimpleEditorAppTest(AppHarness, unittest.TestCase):
             record.description_id for record in self.app.store.export_descriptions()
         })
 
-    def test_typing_while_focused_does_not_save_or_request_save(self):
+    def test_dirty_poll_without_save_payload_does_not_write(self):
         record = self.create("tab")
         for _ in range(3):
             response = self.editor_poll(record, modified=True, content="in progress")
             self.assertTrue(response["editor_focused"])
             self.assertFalse(response["saved"])
             self.assertFalse(response["write_requested"])
-            self.assertEqual(self.stored(record).content, "")
+            self.assertEqual(self.stored(record).content, record["content"])
         self.assertEqual(self.methods("notification.show"), [])
 
     def test_blur_to_source_other_tab_space_and_description_saves_without_focus_theft(self):
@@ -976,10 +994,10 @@ class SimpleEditorAppTest(AppHarness, unittest.TestCase):
                     self.poll(record, app=app, editor="simple", modified=True)["save_request"]["id"],
                     request["id"],
                 )
-                self.assertEqual(self.stored(record, app).content, "")
+                self.assertEqual(self.stored(record, app).content, record["content"])
                 response = self.poll(record, app=app, editor="simple", modified=True, save={
                     "content": "draft " + destination,
-                    "expected_digest": hashlib.sha256(b"").hexdigest(),
+                    "expected_digest": hashlib.sha256(record["content"].encode("utf-8")).hexdigest(),
                     "request_id": request["id"], "force": False,
                 })
                 self.assertTrue(response["saved"])
@@ -1058,7 +1076,7 @@ class SimpleEditorAppTest(AppHarness, unittest.TestCase):
             response = self.save(record, "not committed", request)
         self.assertIn("error", response)
         self.assertFalse(response.get("saved"))
-        self.assertEqual(self.stored(record).content, "")
+        self.assertEqual(self.stored(record).content, record["content"])
         self.assertEqual(self.section(record)["request"]["id"], request["id"])
         self.assertFalse(any(item["title"].endswith("description saved") for item in self.methods("notification.show")))
 
@@ -1067,11 +1085,12 @@ class SimpleEditorAppTest(AppHarness, unittest.TestCase):
         other = self.create("space")
         response = self.editor_poll(record, modified=True, description_id=other["description_id"], save={
             "content": "tab only", "description_id": other["description_id"],
-            "expected_digest": hashlib.sha256(b"").hexdigest(), "request_id": None, "force": False,
+            "expected_digest": hashlib.sha256(record["content"].encode("utf-8")).hexdigest(),
+            "request_id": None, "force": False,
         })
         self.assertTrue(response["saved"])
         self.assertEqual(self.stored(record).content, "tab only")
-        self.assertEqual(self.stored(other).content, "")
+        self.assertEqual(self.stored(other).content, other["content"])
 
     def test_remove_description_deletes_file_mapping_and_only_its_editor(self):
         records = [self.create("space"), self.create("tab"), self.create("pane", pane_id="shell-1")]

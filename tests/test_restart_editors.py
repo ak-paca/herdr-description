@@ -79,7 +79,7 @@ class RestartEditorsTest(AppHarness, unittest.TestCase):
             request = response["save_request"]
             response = self.poll(record, editor="simple", modified=True, save={
                 "content": "unsaved draft",
-                "expected_digest": hashlib.sha256(b"").hexdigest(),
+                "expected_digest": hashlib.sha256(record["content"].encode("utf-8")).hexdigest(),
                 "request_id": request["id"],
             })
             self.assertTrue(response["saved"])

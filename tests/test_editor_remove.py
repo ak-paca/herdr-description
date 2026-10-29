@@ -98,15 +98,18 @@ class EditorRemoveTest(unittest.TestCase):
                 self.assertFalse(self.session.closed)
                 self.assertTrue(self.editor.running)
 
-    def test_footer_offers_remove_only_while_supported(self):
-        self.screen.getmaxyx.return_value = (4, 80)
+    def test_help_offers_remove_only_while_supported(self):
+        self.screen.getmaxyx.return_value = (24, 80)
         for removable in (False, True, False):
             with self.subTest(removable=removable):
                 self.poll.return_value = {"removable": removable}
                 self.session.tick()
+                self.screen.reset_mock()
+                self.editor.handle_key("\x1f")
                 self.editor.draw()
-                footer = self.screen.addstr.call_args.args[2]
-                self.assertEqual(removable, "^X remove" in footer)
+                helper = "".join(call.args[2] for call in self.screen.addstr.call_args_list)
+                self.assertEqual(removable, "Ctrl+X: remove description" in helper)
+                self.editor.handle_key("q")
 
     def test_ctrl_x_exits_curses_loop_without_another_poll_or_save(self):
         self.poll.side_effect = [{"removable": True}, {"closed": True}]
@@ -201,7 +204,7 @@ class EditorRemoveIntegrationTest(AppHarness, unittest.TestCase):
         self.assertIsNone(self.stored(space_record))
         self.assertFalse(Path(space_record["file_path"]).exists())
         self.assertIsNotNone(self.stored(tab_record))
-        self.assertEqual("", self.stored(tab_record).content)
+        self.assertEqual(tab_record["content"], self.stored(tab_record).content)
         self.assertTrue(all(
             pane_id not in {pane["pane_id"] for pane in self.api.panes}
             for pane_id in pane_ids
