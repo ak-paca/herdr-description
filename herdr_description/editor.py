@@ -17,6 +17,7 @@ class TextBuffer:
         self.row = 0
         self.column = 0
         self.preferred_column = None
+        self.editing_error = ""
 
     @property
     def content(self):
@@ -42,6 +43,7 @@ class TextBuffer:
             self.replace(content)
 
     def insert(self, text):
+        self._check_editable()
         before = self.lines[self.row][:self.column]
         after = self.lines[self.row][self.column:]
         inserted = text.split("\n")
@@ -54,6 +56,7 @@ class TextBuffer:
         self.preferred_column = None
 
     def backspace(self):
+        self._check_editable()
         if self.column:
             line = self.lines[self.row]
             self.lines[self.row] = line[:self.column - 1] + line[self.column:]
@@ -67,6 +70,7 @@ class TextBuffer:
         self.preferred_column = None
 
     def delete(self):
+        self._check_editable()
         line = self.lines[self.row]
         if self.column < len(line):
             self.lines[self.row] = line[:self.column] + line[self.column + 1:]
@@ -75,6 +79,7 @@ class TextBuffer:
         self.preferred_column = None
 
     def delete_line(self):
+        self._check_editable()
         del self.lines[self.row]
         if not self.lines:
             self.lines = [""]
@@ -83,10 +88,15 @@ class TextBuffer:
         self.preferred_column = None
 
     def clear(self):
+        self._check_editable()
         self.lines = [""]
         self.row = 0
         self.column = 0
         self.preferred_column = None
+
+    def _check_editable(self):
+        if self.editing_error:
+            raise RuntimeError(self.editing_error)
 
     def move_horizontal(self, delta):
         for unused in range(abs(delta)):
@@ -364,6 +374,7 @@ class EditorScreen:
         return True
 
     def _delete_selection(self):
+        self.session.buffer._check_editable()
         selection = self.selection
         self.clear_selection()
         if selection is None:
@@ -584,6 +595,9 @@ class EditorScreen:
     def draw(self):
         screen = self.screen
         session = self.session
+        if getattr(session, "pending_prompt", None) and not self.prompt and not self.help_open:
+            self.prompt = session.pending_prompt
+            session.pending_prompt = None
         buffer = session.buffer
         height, width = screen.getmaxyx()
         body_height, footer_rows = self._layout()
@@ -665,6 +679,9 @@ class EditorScreen:
             if key == "\x17":
                 self.word_wrap = not self.word_wrap
             elif isinstance(key, str) and key.lower() == "y":
+                if buffer.editing_error:
+                    self.notice = buffer.editing_error
+                    return
                 if self.prompt == "reload":
                     self.session.reload()
                 elif self.prompt == "clear":
@@ -676,6 +693,15 @@ class EditorScreen:
                 self.prompt = None
             elif key in ("n", "N", "\x1b", "\n", "\r", curses.KEY_ENTER):
                 self.prompt = None
+            return
+        if buffer.editing_error and (
+            key in (
+                curses.KEY_ENTER, "\n", "\r", "\t", curses.KEY_BACKSPACE,
+                "\x7f", "\b", curses.KEY_DC, "\x0b", "\x0c",
+            )
+            or isinstance(key, str) and key.isprintable()
+        ):
+            self.notice = buffer.editing_error
             return
         shifted = {
             getattr(curses, "KEY_SLEFT", -10): curses.KEY_LEFT,
@@ -876,6 +902,10 @@ class EditorScreen:
         try:
             while self.running and not self.session.closed:
                 now = time.monotonic()
+                if hasattr(self.session, "pump"):
+                    self.session.pump()
+                    if self.session.closed:
+                        break
                 if now >= next_poll:
                     self.session.tick()
                     next_poll = time.monotonic() + 0.2
@@ -895,6 +925,11 @@ class EditorScreen:
 
 
 def run_editor(file_path: Path, poll) -> None:
+    from .editor_async import AsyncEditorSession
+
     locale.setlocale(locale.LC_ALL, "")
-    session = EditorSession(file_path, poll)
-    curses.wrapper(lambda screen: EditorScreen(screen, session).run())
+    session = AsyncEditorSession(file_path, poll)
+    try:
+        curses.wrapper(lambda screen: EditorScreen(screen, session).run())
+    finally:
+        session.shutdown()

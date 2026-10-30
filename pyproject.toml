@@ -1,6 +1,6 @@
 [project]
 name = "herdr-description"
-version = "0.5.0"
+version = "0.5.1"
 description = "Persistent space, tab and pane descriptions through the Herdr plugin API"
 readme = "README.md"
 requires-python = ">=3.9"

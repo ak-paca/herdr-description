@@ -110,6 +110,9 @@ class App:
             changed = view.get("panes") != panes or view.get("focused_source_pane") != focused
             for section in view.get("sections", {}).values():
                 editor_focused = snapshot.get("focused_pane_id") == section.get("pane_id")
+                if editor_focused and section.get("restart_acknowledged"):
+                    section["restart_cancelled"] = section.pop("restart_acknowledged")
+                    changed = True
                 if section.get("editor") == "simple" and section.get("editor_focused") and not editor_focused:
                     self.request_save(section, "blur")
                     changed = True
@@ -125,6 +128,9 @@ class App:
                 self.runtime.put_view(view)
 
     def request_save(self, section, reason):
+        if reason == "restart":
+            section.pop("restart_acknowledged", None)
+            section.pop("restart_cancelled", None)
         section["request"] = {
             "id": time.time_ns(), "action": "save", "reason": reason,
             "return_focus": reason == "manual",
@@ -620,6 +626,8 @@ class App:
                     view, state, unused = locate(target)
                     if state is None:
                         continue
+                    if state.get("restart_cancelled") == target["request_id"]:
+                        raise HerdrError("An editor was refocused; restart cancelled and editors were kept.")
                     request = state.get("request")
                     if request is not None:
                         if request.get("id") != target["request_id"]:
@@ -644,6 +652,8 @@ class App:
                     raise HerdrError("Pane ownership or the tab layout changed; editors were left open.")
                 if target["live"] and (state.get("request") or state.get("modified")):
                     raise HerdrError("An editor changed after saving; save it and retry the restart.")
+                if target["live"] and state.get("restart_cancelled") == target["request_id"]:
+                    raise HerdrError("An editor was refocused; restart cancelled and editors were kept.")
                 if snapshot.get("focused_pane_id") == pane["pane_id"]:
                     raise HerdrError("An editor regained focus. Focus a work pane and retry the restart.")
             for target in targets:
@@ -653,6 +663,8 @@ class App:
                     continue
                 if pane is None or not self.source_panes(snapshot, view["tab_id"]):
                     raise HerdrError("A description pane changed during restart; remaining panes were kept.")
+                if target["live"] and state.get("restart_cancelled") == target["request_id"]:
+                    raise HerdrError("An editor was refocused; remaining panes were kept.")
                 if snapshot.get("focused_pane_id") == pane["pane_id"]:
                     raise HerdrError("An editor regained focus; remaining panes were kept.")
                 self.api.call("pane.close", pane_id=pane["pane_id"])
@@ -676,11 +688,12 @@ class App:
                 return {"error": "Editor was replaced; your unsaved text is retained."} if payload.get("modified") else {"closed": True}
             state_before = json.dumps(view, sort_keys=True)
             simple = payload.get("editor") == "simple"
+            asynchronous = simple and payload.get("async") is True
             if simple:
                 section["editor"] = "simple"
             if section.get("discard"):
                 self.close_section(view, section_id)
-                return {"closed": True}
+                return {"closed": True, **({"discarded": True} if asynchronous else {})}
             if payload.get("remove") is True:
                 record = self.store.get_mapping(self.session, section["kind"], section["target_id"])
                 if record and record.description_id == section_id:
@@ -696,7 +709,8 @@ class App:
             if record is None or record.description_id != section_id:
                 if payload.get("modified"):
                     return {"error": "Description was removed; unsaved text is retained."}
-                self.close_section(view, section_id)
+                if not asynchronous:
+                    self.close_section(view, section_id)
                 return {"closed": True}
             self.config = (
                 toggle_autosave(self.config_dir) if payload.get("toggle_autosave") is True
@@ -707,17 +721,31 @@ class App:
                 record.kind == "pane"
                 and record.tab_id != self.target(view["workspace_id"], tab_id, "tab")
             )
+            if asynchronous:
+                snapshot = self.api.snapshot()
+                section["editor_focused"] = snapshot.get("focused_pane_id") == section["pane_id"]
+                if retired and (section.get("request") or {}).get("reason") not in ("restart", "retire"):
+                    self.request_save(section, "retire")
             if simple and payload.get("modified") and not section.get("request"):
                 snapshot = self.api.snapshot()
                 section["editor_focused"] = snapshot.get("focused_pane_id") == section["pane_id"]
                 if not section["editor_focused"]:
                     self.request_save(section, "blur")
             request = section.get("request") or {}
-            if payload.get("ack_request") == request.get("id") and request:
+            save = payload.get("save") if simple else None
+            acknowledged = (
+                request and payload.get("ack_request") == request.get("id")
+                and payload.get("modified") is False and save is None
+            )
+            if acknowledged:
                 section["request"] = None
+                if asynchronous and request.get("reason") == "restart":
+                    section["restart_acknowledged"] = request["id"]
+            if asynchronous and section.get("restart_acknowledged") and section.get("editor_focused"):
+                section["restart_cancelled"] = section.pop("restart_acknowledged")
             saved = False
             warning = None
-            save = payload.get("save") if simple else None
+            deferred_ack = isinstance(save, dict) and save.get("defer_ack") is True
             if save is not None:
                 if not isinstance(save, dict):
                     raise ValueError("Invalid editor save request.")
@@ -732,27 +760,34 @@ class App:
                         force=save.get("force", False),
                     )
                 except DocumentConflictError as error:
+                    section["modified"] = bool(payload.get("modified")) or section.get("modified", False)
                     self.runtime.put_view(view)
                     self.notify("Could not save {} description: file changed elsewhere.".format(record.kind))
                     return {"error": str(error), "conflict": True, **mode}
                 except (OSError, DescriptionStoreError) as error:
+                    section["modified"] = bool(payload.get("modified")) or section.get("modified", False)
                     self.runtime.put_view(view)
                     self.notify("Could not save {} description: {}".format(record.kind, error))
                     return {"error": str(error), **mode}
                 saved = True
                 requested_id = save.get("request_id")
-                if requested_id is None or requested_id == request.get("id"):
+                if not deferred_ack and (requested_id is None or requested_id == request.get("id")):
                     section["request"] = None
+                if deferred_ack:
+                    section["modified"] = True
                 if save.get("reason") != "autosave":
                     self.notify("", title="{} description saved".format(record.kind.capitalize()))
             elif payload.get("saved"):
                 saved = True
                 section["request"] = None
-            if saved:
+            if saved or acknowledged:
                 self.runtime.put_view(view)
-                return_focus = payload.get("return_focus", False)
+                return_focus = request.get("return_focus", False) if acknowledged else payload.get("return_focus", False)
                 if save is not None:
-                    return_focus = request.get("return_focus", False) and save.get("reason") != "autosave"
+                    return_focus = (
+                        request.get("return_focus", False) and save.get("reason") != "autosave"
+                        and not deferred_ack
+                    )
                 if request.get("reason") == "restart":
                     return_focus = False
                 if return_focus:
@@ -762,11 +797,11 @@ class App:
                         self.restore_focus(view)
                     except (HerdrError, OSError) as error:
                         warning = "Saved, but could not restore focus: " + str(error)
-            modified = bool(payload.get("modified")) and not saved
+            modified = bool(saved and deferred_ack or payload.get("modified") and not saved)
             section["modified"] = modified
             if json.dumps(view, sort_keys=True) != state_before:
                 self.runtime.put_view(view)
-            if retired and not modified:
+            if retired and not modified and not section.get("request"):
                 self.close_section(view, section_id)
                 self.sync_indicators()
                 return {"closed": True, "saved": saved}
@@ -781,6 +816,7 @@ class App:
                 "write_requested": (section.get("request") or {}).get("action") == "save",
                 "save_request": section.get("request"),
                 "editor_focused": section.get("editor_focused", False),
+                "restart_cancelled": section.get("restart_cancelled"), "retired": retired,
                 "warning": warning or name_warning,
             }
 
@@ -831,6 +867,15 @@ class App:
             data = event.get("data", event)
             event_type = data.get("type", "")
             workspace_id = data.get("workspace_id")
+            if event_type == "pane_focused":
+                for view in self.runtime.views():
+                    changed = False
+                    for section in view.get("sections", {}).values():
+                        if section.get("pane_id") == data.get("pane_id") and section.get("restart_acknowledged"):
+                            section["restart_cancelled"] = section.pop("restart_acknowledged")
+                            changed = True
+                    if changed:
+                        self.runtime.put_view(view)
             close_tabs = set()
             moved_pane_id = None
             if event_type in ("pane_closed", "pane_exited"):

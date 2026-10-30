@@ -493,13 +493,13 @@ class EditorFeatureTest(unittest.TestCase):
             os.write(master, ("\x17" + uri + "\r界").encode("utf-8"))
             wait_until(lambda: self.file_path.read_text() == content)
             wait_until(lambda: ("\x1b]8;;" + uri + "\x1b\\").encode() in transcript)
-            self.assertEqual(len(content), sum("save" in message for message in messages()))
+            self.assertEqual(1, sum("save" in message for message in messages()))
             os.write(master, b"\x1fxq\x01draft")
             wait_until(lambda: any(message.get("modified") and "save" not in message for message in messages()))
             self.assertEqual(content, self.file_path.read_text())
             os.write(master, b"\x01")
             wait_until(lambda: self.file_path.read_text() == content + "draft")
-            self.assertEqual(len(content) + 1, sum("save" in message for message in messages()))
+            self.assertEqual(2, sum("save" in message for message in messages()))
             os.write(master, b"\x00" + b"\x1bOD" * 3 + b"\x03")
             wait_until(lambda: b"\x1b]52;c;YWZ0\x1b\\" in transcript)
             self.assertEqual(content + "draft", self.file_path.read_text())
@@ -507,7 +507,7 @@ class EditorFeatureTest(unittest.TestCase):
             os.write(master, b"\x1b[<0;1;1M\x1b[<32;6;1M\x1b[<0;6;1m\x03")
             wait_until(lambda: b"\x1b]52;c;aHR0cHM=\x1b\\" in transcript[mouse_start:])
             self.assertEqual(content + "draft", self.file_path.read_text())
-            self.assertEqual(len(content) + 1, sum("save" in message for message in messages()))
+            self.assertEqual(2, sum("save" in message for message in messages()))
             mouse_start = len(transcript)
             polls = len(messages())
             os.write(master, b"\x1b[<0;9;")
@@ -516,7 +516,7 @@ class EditorFeatureTest(unittest.TestCase):
             os.write(master, b"1M\x1b[<32;12;1M\x1b[<0;12;1m\x03")
             wait_until(lambda: b"\x1b]52;c;ZXhh\x1b\\" in transcript[mouse_start:])
             self.assertEqual(content + "draft", self.file_path.read_text())
-            self.assertEqual(len(content) + 1, sum("save" in message for message in messages()))
+            self.assertEqual(2, sum("save" in message for message in messages()))
             polls = len(messages())
             os.write(master, b"\x1b[<" + b"9" * 80 + b";1;1M\x1b")
             wait_until(lambda: len(messages()) >= polls + 2)
@@ -524,7 +524,7 @@ class EditorFeatureTest(unittest.TestCase):
             os.write(master, b"!")
             edited = content[:11] + "!" + content[11:] + "draft"
             wait_until(lambda: self.file_path.read_text() == edited)
-            self.assertEqual(len(content) + 2, sum("save" in message for message in messages()))
+            self.assertEqual(3, sum("save" in message for message in messages()))
             polls = len(messages())
             os.write(master, b"\x1f\x1b")
             wait_until(lambda: len(messages()) >= polls + 2)
@@ -533,6 +533,110 @@ class EditorFeatureTest(unittest.TestCase):
             os.write(master, b"\x18")
             wait_until(lambda: process.poll() is not None)
             self.assertEqual(0, process.returncode)
+            self.assertFalse(self.file_path.exists())
+        finally:
+            if process.poll() is None:
+                process.kill()
+                process.wait(timeout=2)
+
+    def test_real_terminal_renders_edits_and_help_while_backend_poll_and_save_are_blocked(self):
+        import fcntl
+        import pty
+        import termios
+
+        try:
+            master, slave = pty.openpty()
+        except OSError as error:
+            self.skipTest("PTY is unavailable: " + str(error))
+        poll_gate, poll_release = os.pipe()
+        save_gate, save_release = os.pipe()
+        for descriptor in (master, slave, poll_gate, poll_release, save_gate, save_release):
+            self.addCleanup(os.close, descriptor)
+        self.replace_content("")
+        root = self.file_path.parent
+        requests = root / "requests.jsonl"
+        script = (
+            "import json, os, sys\n"
+            "from pathlib import Path\n"
+            "from herdr_description.editor import run_editor\n"
+            "root=Path(sys.argv[1])\n"
+            "path=root/'description.txt'\n"
+            "first_poll=True\n"
+            "first_save=True\n"
+            "def poll(payload):\n"
+            "    global first_poll, first_save\n"
+            "    with (root/'requests.jsonl').open('a') as log:\n"
+            "        log.write(json.dumps(payload)+'\\n')\n"
+            "    if first_poll:\n"
+            "        first_poll=False\n"
+            "        os.read(int(sys.argv[2]), 1)\n"
+            "    if payload.get('remove'):\n"
+            "        path.unlink()\n"
+            "        return {'closed': True}\n"
+            "    saved=bool(payload.get('save'))\n"
+            "    if saved:\n"
+            "        if first_save:\n"
+            "            first_save=False\n"
+            "            os.read(int(sys.argv[3]), 1)\n"
+            "        path.write_text(payload['save']['content'], encoding='utf-8')\n"
+            "    return {'record': {'content': path.read_text(encoding='utf-8')},\n"
+            "        'saved': saved, 'removable': True,\n"
+            "        'autosave_supported': True, 'autosave_enabled': True}\n"
+            "run_editor(path, poll)\n"
+        )
+        fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 18, 60, 0, 0))
+        process = subprocess.Popen(
+            [sys.executable, "-c", script, str(root), str(poll_gate), str(save_gate)],
+            cwd=str(ROOT), env={**os.environ, "TERM": "xterm-256color",
+                                "LC_ALL": locale.setlocale(locale.LC_CTYPE)},
+            stdin=slave, stdout=slave, stderr=slave, pass_fds=(poll_gate, save_gate),
+        )
+        transcript = bytearray()
+
+        def messages():
+            if not requests.exists():
+                return []
+            return [json.loads(line) for line in requests.read_text().splitlines() if line.endswith("}")]
+
+        def wait_until(predicate):
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline:
+                if select.select([master], [], [], 0.02)[0]:
+                    transcript.extend(os.read(master, 65536))
+                if predicate():
+                    return
+                if process.poll() is not None:
+                    self.fail("Editor exited: " + transcript.decode(errors="replace")[-2000:])
+            self.fail("Editor timed out: " + transcript.decode(errors="replace")[-2000:])
+
+        try:
+            wait_until(lambda: messages() and b"\x1b[?1006h" in transcript)
+            os.write(master, "first界".encode())
+            wait_until(lambda: "界".encode() in transcript)
+            self.assertEqual(self.file_path.read_text(), "")
+            self.assertEqual(len(messages()), 1)
+            os.write(poll_release, b"1")
+            wait_until(lambda: any(message.get("save") for message in messages()))
+            first = next(message["save"]["content"] for message in messages() if message.get("save"))
+            self.assertEqual(first, "first界")
+            uri = "https://example.org/日本?q=a%20b&other=1#part"
+            latest = first + "\n" + uri + "\n最新"
+            frame_start = len(transcript)
+            os.write(master, ("\x17\r" + uri + "\r最新").encode())
+            wait_until(lambda: "新".encode() in transcript[frame_start:])
+            wait_until(lambda: ("\x1b]8;;" + uri + "\x1b\\").encode() in transcript[frame_start:])
+            self.assertEqual(self.file_path.read_text(), "")
+            os.write(master, b"\x1f")
+            wait_until(lambda: b"Commands" in transcript[frame_start:])
+            os.write(master, b"q\x1b[<0;1;1M\x1b[<32;6;1M\x1b[<0;6;1m\x03")
+            wait_until(lambda: b"\x1b]52;c;Zmlyc3Q=\x1b\\" in transcript[frame_start:])
+            self.assertEqual(sum("save" in message for message in messages()), 1)
+            os.write(save_release, b"1")
+            wait_until(lambda: self.file_path.read_text() == latest)
+            self.assertEqual(sum("save" in message for message in messages()), 2)
+            os.write(master, b"\x18")
+            wait_until(lambda: process.poll() is not None)
+            self.assertEqual(process.returncode, 0)
             self.assertFalse(self.file_path.exists())
         finally:
             if process.poll() is None:

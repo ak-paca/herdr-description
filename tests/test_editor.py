@@ -541,8 +541,11 @@ class CursesIntegrationTest(unittest.TestCase):
                 "    saved=False\n"
                 "    if payload.get('save'):\n"
                 "        path.write_text(payload['save']['content'], encoding='utf-8')\n"
-                "        (root/'blur').unlink()\n"
+                "        if not payload['save'].get('defer_ack'):\n"
+                "            (root/'blur').unlink(missing_ok=True)\n"
                 "        saved=True\n"
+                "    if payload.get('ack_request') == 123 and not payload.get('modified') and not payload.get('save'):\n"
+                "        (root/'blur').unlink(missing_ok=True)\n"
                 "    return {'record': {'content': path.read_text(encoding='utf-8'),\n"
                 "        'title': 'Pane description', 'focused': True}, 'saved': saved, 'removable': True,\n"
                 "        'write_requested': (root/'blur').exists(),\n"
@@ -560,6 +563,18 @@ class CursesIntegrationTest(unittest.TestCase):
                 cwd=str(ROOT), env=environment, stdin=slave, stdout=slave, stderr=slave,
             )
             transcript = bytearray()
+
+            def messages():
+                return [json.loads(line) for line in requests.read_text().splitlines() if line.endswith("}")]
+
+            def acknowledged():
+                completed = False
+                for message in messages():
+                    if message.get("ack_request") == 123 and not message.get("modified"):
+                        completed = True
+                    elif completed and message.get("modified") is False and not message.get("save"):
+                        return True
+                return False
 
             def wait_until(predicate):
                 deadline = time.monotonic() + 5
@@ -579,14 +594,15 @@ class CursesIntegrationTest(unittest.TestCase):
                 self.assertEqual("", file_path.read_text())
                 trigger.touch()
                 wait_until(lambda: file_path.read_text() == "Привет 👋\nsecond line")
+                wait_until(acknowledged)
                 os.write(master, b"unsaved draft\x18")
                 wait_until(lambda: process.poll() is not None)
                 self.assertEqual(0, process.returncode)
                 self.assertFalse(file_path.exists())
-                messages = [json.loads(line) for line in requests.read_text().splitlines()]
-                self.assertEqual(1, sum("save" in message for message in messages))
+                completed = messages()
+                self.assertEqual(1, sum("save" in message for message in completed))
                 self.assertEqual(
-                    {"editor": "simple", "remove": True}, messages[-1]
+                    {"editor": "simple", "async": True, "remove": True}, completed[-1]
                 )
                 self.assertNotIn(b"Pane description", transcript)
             finally:

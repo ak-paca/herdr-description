@@ -4,7 +4,7 @@
 
 Persistent descriptions for Herdr spaces, tabs, and panes. Requires Herdr 0.9.3+ and Python 3.9+ with `curses`. No third-party dependencies.
 
-Descriptions open as stacked native panes in a full-height column on the right. Type in the editor; there are no Vim modes. Each text modification saves automatically by default.
+Descriptions open as stacked native panes in a full-height column on the right. Type in the editor; there are no Vim modes. Edits save automatically in background batches by default.
 
 When regrouping an existing split layout, the plugin briefly moves panes through a temporary tab. Running terminals and editors, pane IDs, and split directions and proportions are preserved.
 
@@ -47,13 +47,17 @@ comment line
 
 Only that description's own header controls its object's name. A blank `-- ` does not blank the name or count as a non-empty description. Removing the header stops controlling the name; the last explicit name remains, and pane metadata from other reporters can become visible again. Description indicators still inherit upward and compose with header names.
 
-`Ctrl+A` toggles per-modification autosave for **all description editors using the same plugin configuration**, including named Herdr sessions. The setting survives restarts. With it off, changes still save on focus loss or `Ctrl+S`. The settings editor always saves manually so incomplete JSON is not applied. Conflicting external edits remain protected; automatic saves never force an overwrite.
+Autosave combines edits after a 150 ms pause, with a one-second trigger during continuous typing. Backend polling, file/database writes, and name updates run on a background worker. Only the latest pending text is written; an older save result cannot replace newer typing. Saved text and names can lag input by the batching delay plus backend processing time.
+
+`Ctrl+S`, focus loss, and editor restart requests bypass the batching delay and flush the latest text. `Ctrl+A` toggles autosave for **all description editors using the same plugin configuration**, including named Herdr sessions. The setting survives restarts. With it off, changes still save on focus loss or `Ctrl+S`. The settings editor always saves manually so incomplete JSON is not applied. Conflicting external edits remain protected; automatic saves never force an overwrite.
+
+An editor pauses text edits while committing its final restart or move-close acknowledgement. Refocusing a restarting editor cancels that restart and resumes editing; selection, copy, and help remain available during this step.
 
 The footer shows status and a help hint. `Ctrl+/` opens the commands helper; press `q` to close it. `Ctrl+_` or `F1` also opens help when the terminal does not distinguish `Ctrl+/`.
 
 | Shortcut | Behavior |
 |---|---|
-| `Ctrl+A` | Toggle global per-modification autosave |
+| `Ctrl+A` | Toggle global background autosave |
 | `Ctrl+/` / `F1` | Open commands helper; `q` closes it |
 | `Ctrl+S` | Save |
 | `Ctrl+R` | Reload (confirms if dirty) |
